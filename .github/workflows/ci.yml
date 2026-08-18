@@ -1,0 +1,76 @@
+name: CI
+
+# go-shared had NO workflow at all until now — 20 packages with tests, ~30
+# services depending on it, and nothing running any of them automatically. A
+# change was verified only by whoever remembered to run `go test` locally.
+#
+# Free to run now that the repository is public.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+          cache-dependency-path: go.sum
+
+      - name: Build
+        run: go build ./...
+
+      - name: Vet
+        run: go vet ./...
+
+      # -race matters more here than in a leaf service. This module ships
+      # middleware, a cache and a messaging publisher that every consumer runs
+      # concurrently, so a data race introduced here is a data race in ~30
+      # services at once.
+      - name: Test
+        run: go test -race -coverprofile=coverage.out ./...
+
+      - name: Coverage summary
+        run: go tool cover -func=coverage.out | tail -1
+
+  # Deliberately a separate, NON-BLOCKING job.
+  #
+  # gofmt currently reports pre-existing files across the module, so making it a
+  # gate would paint every unrelated PR red on day one and teach people to
+  # ignore this workflow. Reporting it keeps the signal visible while the
+  # backlog is cleared; promote it to a blocking step once `gofmt -l .` is
+  # empty.
+  format:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+          cache-dependency-path: go.sum
+
+      - name: Report unformatted files
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "::warning::gofmt reports unformatted files (not blocking yet):"
+            echo "$unformatted"
+          else
+            echo "gofmt is clean — this job can become a blocking gate."
+          fi
