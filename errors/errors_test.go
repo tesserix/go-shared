@@ -678,3 +678,79 @@ func TestExternalServiceError_MutatingDetailsDoesNotAffectOriginalError(t *testi
 		"Details map is shared by reference; callers must not mutate it")
 	_ = originalService
 }
+
+// --- Constructor: NewUnavailableError ---
+
+// TestNewUnavailableError verifies the code and status for a dependency that
+// could not be reached at all.
+func TestNewUnavailableError(t *testing.T) {
+	err := apperrors.NewUnavailableError("uptime probe is not configured")
+
+	assert.Equal(t, apperrors.ErrCodeUnavailable, err.Code)
+	assert.Equal(t, "uptime probe is not configured", err.Message)
+	assert.Equal(t, http.StatusServiceUnavailable, err.StatusCode)
+	assert.Nil(t, err.Details)
+}
+
+// TestNewUnavailableError_IsDistinguishableFromExternalServiceError is the
+// point of the constructor existing. Both are 503, so the CODE is the only
+// thing a caller can branch on to tell "nothing answered" from "something
+// answered with an error" — which is the difference between rendering
+// "not measured" and rendering "failed".
+func TestNewUnavailableError_IsDistinguishableFromExternalServiceError(t *testing.T) {
+	unavailable := apperrors.NewUnavailableError("clickhouse is not configured")
+	failed := apperrors.NewExternalServiceError("clickhouse", fmt.Errorf("query timeout"))
+
+	assert.Equal(t, unavailable.StatusCode, failed.StatusCode,
+		"both are 503; the status cannot be what distinguishes them")
+	assert.NotEqual(t, unavailable.Code, failed.Code,
+		"the code must distinguish 'not reachable' from 'reached and failed'")
+}
+
+// TestNewUnavailableError_SatisfiesErrorInterface confirms it behaves like the
+// other constructors under errors.As.
+func TestNewUnavailableError_SatisfiesErrorInterface(t *testing.T) {
+	var err error = apperrors.NewUnavailableError("not configured")
+
+	var target apperrors.AppError
+	assert.True(t, errors.As(err, &target))
+	assert.Equal(t, apperrors.ErrCodeUnavailable, target.Code)
+}
+
+// --- Regression: NewExternalServiceError with a nil cause ---
+
+// TestNewExternalServiceError_NilErrorDoesNotPanic is a regression test.
+//
+// This constructor called err.Error() unconditionally, so passing a nil error
+// panicked with a nil pointer dereference. It is called on failure paths —
+// frequently from a wrapper that may have no error to hand — and an error
+// constructor that panics converts a handled failure into a crashed request.
+func TestNewExternalServiceError_NilErrorDoesNotPanic(t *testing.T) {
+	assert.NotPanics(t, func() {
+		_ = apperrors.NewExternalServiceError("payments", nil)
+	})
+}
+
+// TestNewExternalServiceError_NilErrorOmitsTheErrorDetail verifies the shape
+// when there is no cause: "error" is absent rather than present and empty, so a
+// consumer checking for the key gets a truthful answer.
+func TestNewExternalServiceError_NilErrorOmitsTheErrorDetail(t *testing.T) {
+	err := apperrors.NewExternalServiceError("payments", nil)
+
+	assert.Equal(t, apperrors.ErrCodeExternalService, err.Code)
+	assert.Equal(t, http.StatusServiceUnavailable, err.StatusCode)
+	assert.Equal(t, "payments", err.Details["service"])
+
+	_, present := err.Details["error"]
+	assert.False(t, present, "absent cause must be omitted, not an empty string")
+}
+
+// TestNewExternalServiceError_NonNilErrorStillCarriesTheCause guards the fix
+// against over-correction — the existing behaviour must be unchanged when a
+// cause is supplied.
+func TestNewExternalServiceError_NonNilErrorStillCarriesTheCause(t *testing.T) {
+	err := apperrors.NewExternalServiceError("inventory", fmt.Errorf("connection refused"))
+
+	assert.Equal(t, "inventory", err.Details["service"])
+	assert.Equal(t, "connection refused", err.Details["error"])
+}
