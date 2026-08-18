@@ -39,6 +39,15 @@ const (
 	ErrCodeValidationFailed  = "VALIDATION_FAILED"
 	ErrCodeDatabaseError     = "DATABASE_ERROR"
 	ErrCodeExternalService   = "EXTERNAL_SERVICE_ERROR"
+	// ErrCodeUnavailable means a dependency could not be reached or is not
+	// configured — distinct from ErrCodeExternalService, which means a
+	// dependency was reached and answered with an error.
+	//
+	// The distinction is not cosmetic. A caller that cannot tell "this upstream
+	// is not wired up" from "this upstream failed" has to render both as broken,
+	// which is how a surface shows an error where it should show "not measured"
+	// (tesserix-home#198).
+	ErrCodeUnavailable = "SERVICE_UNAVAILABLE"
 
 	// Domain-specific errors
 	ErrCodeResourceNotFound      = "RESOURCE_NOT_FOUND"
@@ -114,16 +123,39 @@ func NewDatabaseError(message string) AppError {
 	}
 }
 
-// NewExternalServiceError creates a new external service error
+// NewExternalServiceError creates a new external service error.
+//
+// A nil err is tolerated. This constructor is called on failure paths, often
+// from a wrapper that may not have an error to hand, and an error constructor
+// that panics turns a handled failure into a crashed request — the one place a
+// panic is least affordable.
 func NewExternalServiceError(service string, err error) AppError {
+	details := map[string]interface{}{"service": service}
+	if err != nil {
+		details["error"] = err.Error()
+	}
 	return AppError{
 		Code:       ErrCodeExternalService,
 		Message:    fmt.Sprintf("External service error: %s", service),
 		StatusCode: http.StatusServiceUnavailable,
-		Details: map[string]interface{}{
-			"service": service,
-			"error":   err.Error(),
-		},
+		Details:    details,
+	}
+}
+
+// NewUnavailableError creates an error for a dependency that could not be
+// reached or is not configured.
+//
+// Use this rather than NewExternalServiceError when nothing answered at all:
+// no connection, no credentials, feature not wired up. Both are 503; only this
+// one lets a caller say "not measured" instead of "failed".
+//
+// The message is shown to callers, so it should describe WHAT is unavailable
+// and not why — the underlying cause belongs in the server's log.
+func NewUnavailableError(message string) AppError {
+	return AppError{
+		Code:       ErrCodeUnavailable,
+		Message:    message,
+		StatusCode: http.StatusServiceUnavailable,
 	}
 }
 
