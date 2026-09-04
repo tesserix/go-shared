@@ -33,8 +33,34 @@ type ToolMetrics struct {
 	duration *prometheus.HistogramVec
 }
 
+// defaultBuckets are bucketed around the 400ms per-tool contract rather than
+// Prometheus defaults.
+var defaultBuckets = []float64{0.01, 0.025, 0.05, 0.1, 0.2, 0.4, 0.8, 2}
+
+// Option adjusts the metrics NewToolMetrics builds. It exists so the first
+// connector that needs something different does not force a signature change in
+// a release ~30 services have already taken.
+type Option func(*options)
+
+type options struct {
+	buckets []float64
+}
+
+// WithBuckets overrides the latency histogram's buckets. Use it only when a
+// connector's budget genuinely differs from the 400ms contract — buckets that
+// vary per service make latency across the estate harder to compare.
+func WithBuckets(b []float64) Option {
+	return func(o *options) {
+		o.buckets = append([]float64(nil), b...)
+	}
+}
+
 // NewToolMetrics registers the metrics on reg.
-func NewToolMetrics(reg prometheus.Registerer, service string) (*ToolMetrics, error) {
+func NewToolMetrics(reg prometheus.Registerer, service string, opts ...Option) (*ToolMetrics, error) {
+	o := options{buckets: defaultBuckets}
+	for _, opt := range opts {
+		opt(&o)
+	}
 	labels := prometheus.Labels{"service": service}
 
 	calls := prometheus.NewCounterVec(prometheus.CounterOpts{
@@ -44,10 +70,9 @@ func NewToolMetrics(reg prometheus.Registerer, service string) (*ToolMetrics, er
 	}, []string{"tool", "outcome"})
 
 	duration := prometheus.NewHistogramVec(prometheus.HistogramOpts{
-		Name: "tesserix_mcp_tool_duration_seconds",
-		Help: "Tool call latency. The engine budgets 400ms p99 per tool; this is how you know whether that contract holds.",
-		// Bucketed around the 400ms contract rather than Prometheus defaults.
-		Buckets:     []float64{0.01, 0.025, 0.05, 0.1, 0.2, 0.4, 0.8, 2},
+		Name:        "tesserix_mcp_tool_duration_seconds",
+		Help:        "Tool call latency. The engine budgets 400ms p99 per tool; this is how you know whether that contract holds.",
+		Buckets:     o.buckets,
 		ConstLabels: labels,
 	}, []string{"tool", "outcome"})
 

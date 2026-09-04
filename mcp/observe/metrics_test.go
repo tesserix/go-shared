@@ -95,3 +95,26 @@ func TestOutcomeFor_MapsEveryKnownFailure(t *testing.T) {
 		})
 	}
 }
+
+// A connector must not need different buckets badly enough to change a tagged
+// signature.
+func TestNewToolMetrics_BucketOverride(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	m, err := NewToolMetrics(reg, "mcp-catalog", WithBuckets([]float64{0.5, 1}))
+	require.NoError(t, err)
+
+	m.Observe("list_store_products", OutcomeOK, 750*time.Millisecond)
+
+	got, err := reg.Gather()
+	require.NoError(t, err)
+	var bounds []float64
+	for _, mf := range got {
+		if mf.GetName() != "tesserix_mcp_tool_duration_seconds" {
+			continue
+		}
+		for _, b := range mf.GetMetric()[0].GetHistogram().GetBucket() {
+			bounds = append(bounds, b.GetUpperBound())
+		}
+	}
+	require.Equal(t, []float64{0.5, 1}, bounds)
+}
