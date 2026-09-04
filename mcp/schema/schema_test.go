@@ -80,3 +80,24 @@ func TestFor_RejectsAllMaps(t *testing.T) {
 	require.Error(t, err, "maps cannot have closed schemas")
 	assert.Contains(t, err.Error(), "map", "error should mention that maps are rejected")
 }
+
+func TestFor_AllowsEmptyStruct(t *testing.T) {
+	s, err := For(struct{}{})
+	require.NoError(t, err, "struct{} with no fields should be valid and represent no arguments")
+
+	assert.Equal(t, "object", s["type"])
+	assert.Equal(t, false, s["additionalProperties"])
+	props := s["properties"].(map[string]any)
+	assert.Equal(t, 0, len(props), "empty struct should have zero properties")
+}
+
+type opaque struct {
+	a int
+	b int
+}
+
+func TestFor_RejectsStructWithOnlyUnexportedFields(t *testing.T) {
+	_, err := For(opaque{})
+	require.Error(t, err, "struct with only unexported fields must be rejected")
+	assert.Contains(t, err.Error(), "exported", "error should explain that no fields are exported")
+}

@@ -95,9 +95,10 @@ func forStructWithVisited(t reflect.Type, visited map[reflect.Type]bool) (map[st
 		}
 	}
 
-	// Error if no exported fields were found
-	if len(props) == 0 {
-		return nil, fmt.Errorf("schema: struct type %s has no exported fields", t)
+	// Error if struct has fields but none are exported (e.g. time.Time-like types)
+	// Allow struct{} through as it correctly represents "no arguments"
+	if len(props) == 0 && t.NumField() > 0 {
+		return nil, fmt.Errorf("schema: struct type %s has fields but none are exported, so its schema would match nothing", t)
 	}
 
 	s := map[string]any{
