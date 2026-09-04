@@ -16,7 +16,7 @@
 // something only MCP servers care about.
 //
 // Only the first of those is machine-enforced. boundaries_test.go checks the
-// real dependency graph (via `go list -deps`) and fails if this package tree
+// real dependency graph, tests included (via `go list -deps -test`), and fails if this package tree
 // imports an MCP SDK or a product package — that is D9 and D2. The absence of
 // protocol types is a design rule, not a machine-checked one: an import gate
 // cannot see a hand-written struct that mirrors a protocol shape (a
