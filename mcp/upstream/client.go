@@ -56,8 +56,10 @@ func WithTimeout(d time.Duration) Option {
 	return func(c *Client) { c.http.Timeout = d }
 }
 
-// WithHTTPClient replaces the underlying client. The timeout is preserved.
-// The supplied client is shallow-copied to avoid mutating the caller's object.
+// WithHTTPClient replaces the underlying client. The timeout is preserved, and
+// so is the no-redirect policy — New re-applies it to the copy after every
+// option has run. The supplied client is shallow-copied to avoid mutating the
+// caller's object.
 func WithHTTPClient(h *http.Client) Option {
 	return func(c *Client) {
 		t := c.http.Timeout
@@ -86,6 +88,16 @@ func New(baseURL string, opts ...Option) (*Client, error) {
 	}
 	for _, o := range opts {
 		o(c)
+	}
+	// Applied AFTER the options so a caller-supplied client cannot reopen the
+	// hole. Headers added by WithHeader are the credential path, and the
+	// stdlib only strips Authorization/Cookie across hosts — every other
+	// header is copied to whatever host a Location names. Not following also
+	// keeps the path guard in Get from being bypassed by a redirect. A 3xx
+	// then falls through Get's status switch to a decode failure, which
+	// classifies as ErrUnavailable: correct for "what I was pointed at moved".
+	c.http.CheckRedirect = func(*http.Request, []*http.Request) error {
+		return http.ErrUseLastResponse
 	}
 	return c, nil
 }

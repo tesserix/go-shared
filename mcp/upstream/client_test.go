@@ -163,3 +163,50 @@ func TestGet_RejectsPathTraversal(t *testing.T) {
 	assert.NotErrorIs(t, err, ErrUnavailable)
 	assert.NotErrorIs(t, err, ErrDeadlineExceeded)
 }
+
+// A redirect must never carry the credential to a host the operator did not
+// configure. Go's stdlib strips Authorization/Cookie across hosts but copies
+// everything WithHeader added, so the only safe policy is not to follow.
+func TestGet_DoesNotFollowRedirect(t *testing.T) {
+	evil := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("redirect target must never be contacted; got %s with key %q",
+			r.URL.Path, r.Header.Get("X-Storefront-Key"))
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"handle":"pwned"}`))
+	}))
+	defer evil.Close()
+
+	good := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Redirect(w, &http.Request{}, evil.URL+"/admin/secrets", http.StatusFound)
+	}))
+	defer good.Close()
+
+	c, err := New(good.URL+"/api/v1", WithHeader("X-Storefront-Key", "secret"))
+	require.NoError(t, err)
+
+	var got result
+	err = c.Get(context.Background(), "/products", nil, &got)
+	require.Error(t, err, "a 3xx is not a result; it must not decode as one")
+	assert.ErrorIs(t, err, ErrUnavailable)
+	assert.Empty(t, got.Handle)
+}
+
+// The redirect policy must survive a caller-supplied client, or the hole
+// reopens through WithHTTPClient.
+func TestGet_DoesNotFollowRedirectWithCallerClient(t *testing.T) {
+	evil := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("redirect target must never be contacted; got %s", r.URL.Path)
+	}))
+	defer evil.Close()
+
+	good := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Redirect(w, &http.Request{}, evil.URL+"/admin/secrets", http.StatusFound)
+	}))
+	defer good.Close()
+
+	c, err := New(good.URL, WithHTTPClient(&http.Client{}))
+	require.NoError(t, err)
+
+	var got result
+	require.Error(t, c.Get(context.Background(), "/products", nil, &got))
+}
