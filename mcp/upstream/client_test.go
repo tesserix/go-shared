@@ -92,3 +92,74 @@ func TestClient_ExposesOnlyGet(t *testing.T) {
 	assert.Equal(t, []string{"Get"}, methods,
 		"the upstream client must be incapable of expressing a write")
 }
+
+// Finding 1: Body-read timeout must be classified as ErrDeadlineExceeded, not ErrUnavailable.
+func TestGet_BodyReadTimeoutIsDeadlineExceeded(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		// Write headers and flush to pass the Do() successfully
+		w.WriteHeader(http.StatusOK)
+		flusher := w.(http.Flusher)
+		flusher.Flush()
+		// Then sleep past the client timeout before writing body
+		time.Sleep(150 * time.Millisecond)
+		_, _ = w.Write([]byte(`{"handle":"mug"}`))
+	}))
+	defer srv.Close()
+
+	c, err := New(srv.URL, WithTimeout(20*time.Millisecond))
+	require.NoError(t, err)
+
+	var got result
+	err = c.Get(context.Background(), "/stall", nil, &got)
+	require.ErrorIs(t, err, ErrDeadlineExceeded,
+		"body-read timeout must be ErrDeadlineExceeded, not ErrUnavailable")
+	assert.NotErrorIs(t, err, ErrUnavailable)
+}
+
+// Finding 2: WithHTTPClient must not mutate the caller's *http.Client.
+func TestWithHTTPClient_DoesNotMutateCaller(t *testing.T) {
+	callerClient := &http.Client{Timeout: 0}
+	originalTimeout := callerClient.Timeout
+
+	_, err := New("http://example.com", WithTimeout(500*time.Millisecond), WithHTTPClient(callerClient))
+	require.NoError(t, err)
+
+	assert.Equal(t, originalTimeout, callerClient.Timeout,
+		"WithHTTPClient must not mutate the caller's *http.Client.Timeout")
+}
+
+// Finding 3a: Base URL path prefix must be preserved.
+func TestGet_PreservesBaseURLPath(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "/api/v1/products", r.URL.Path,
+			"base path /api/v1 must be preserved when requesting /products")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"handle":"item"}`))
+	}))
+	defer srv.Close()
+
+	c, err := New(srv.URL + "/api/v1")
+	require.NoError(t, err)
+
+	var got result
+	require.NoError(t, c.Get(context.Background(), "/products", nil, &got))
+	assert.Equal(t, "item", got.Handle)
+}
+
+// Finding 3b: Path traversal with .. must be rejected.
+func TestGet_RejectsPathTraversal(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("server must not receive request with path %s", r.URL.Path)
+	}))
+	defer srv.Close()
+
+	c, err := New(srv.URL + "/api/v1/products")
+	require.NoError(t, err)
+
+	var got result
+	err = c.Get(context.Background(), "/../admin", nil, &got)
+	require.Error(t, err, "path traversal must be rejected")
+	assert.NotErrorIs(t, err, ErrNotFound)
+	assert.NotErrorIs(t, err, ErrUnavailable)
+	assert.NotErrorIs(t, err, ErrDeadlineExceeded)
+}

@@ -3,6 +3,11 @@
 // It exposes exactly one verb. That is D6 made structural: a connector cannot
 // perform a write because there is no method that issues one, not because an
 // author remembered to avoid it.
+//
+// The base URL may include a path prefix (e.g., http://svc:8080/api/v1).
+// When Get() is called, the request path is joined to the base path, and
+// the result must remain within the base path prefix. Path traversal
+// attempts (e.g., "/../admin") are rejected with an error.
 package upstream
 
 import (
@@ -14,6 +19,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"path"
 	"strings"
 	"time"
 )
@@ -51,10 +57,13 @@ func WithTimeout(d time.Duration) Option {
 }
 
 // WithHTTPClient replaces the underlying client. The timeout is preserved.
+// The supplied client is shallow-copied to avoid mutating the caller's object.
 func WithHTTPClient(h *http.Client) Option {
 	return func(c *Client) {
 		t := c.http.Timeout
-		c.http = h
+		// Shallow-copy to avoid mutating the caller's client.
+		cp := *h
+		c.http = &cp
 		if c.http.Timeout == 0 {
 			c.http.Timeout = t
 		}
@@ -82,12 +91,39 @@ func New(baseURL string, opts ...Option) (*Client, error) {
 }
 
 // Get fetches path and decodes the JSON body into out.
-func (c *Client) Get(ctx context.Context, path string, params url.Values, out any) error {
-	ref := &url.URL{Path: path}
-	if params != nil {
-		ref.RawQuery = params.Encode()
+// The request path is joined to the base URL's path prefix.
+// Path traversal attempts that would escape the base path are rejected.
+func (c *Client) Get(ctx context.Context, reqPath string, params url.Values, out any) error {
+	// Join base path with request path by string concatenation, not path.Join,
+	// to avoid absolute request paths replacing the base path entirely.
+	// Normalize base: if empty, use "/".
+	basePath := c.base.Path
+	if basePath == "" {
+		basePath = "/"
 	}
-	target := c.base.ResolveReference(ref)
+	// Ensure reqPath starts with /
+	if !strings.HasPrefix(reqPath, "/") {
+		reqPath = "/" + reqPath
+	}
+	// Concatenate: trim trailing / from base, append request path
+	basePath = strings.TrimSuffix(basePath, "/")
+	fullPath := basePath + reqPath
+	fullPath = path.Clean(fullPath)
+
+	// Guard against escape: the result must be within the base path.
+	// If base is /api/v1, and reqPath is /../admin, fullPath becomes /admin,
+	// which is outside /api/v1. Reject it.
+	basePath = strings.TrimSuffix(basePath, "/")
+	if basePath != "" && !strings.HasPrefix(fullPath+"/", basePath+"/") && fullPath != basePath {
+		return fmt.Errorf("upstream: path traversal rejected")
+	}
+
+	target := &url.URL{
+		Scheme:   c.base.Scheme,
+		Host:     c.base.Host,
+		Path:     fullPath,
+		RawQuery: params.Encode(),
+	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, target.String(), nil)
 	if err != nil {
@@ -100,7 +136,7 @@ func (c *Client) Get(ctx context.Context, path string, params url.Values, out an
 
 	resp, err := c.http.Do(req)
 	if err != nil {
-		if errors.Is(err, context.DeadlineExceeded) || isTimeout(err) {
+		if classifyError(err) == ErrDeadlineExceeded {
 			return fmt.Errorf("%w: %s", ErrDeadlineExceeded, err)
 		}
 		return fmt.Errorf("%w: %s", ErrUnavailable, err)
@@ -119,10 +155,22 @@ func (c *Client) Get(ctx context.Context, path string, params url.Values, out an
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
+		if classifyError(err) == ErrDeadlineExceeded {
+			return fmt.Errorf("%w: %s", ErrDeadlineExceeded, err)
+		}
 		return fmt.Errorf("%w: reading body: %s", ErrUnavailable, err)
 	}
 	if err := json.Unmarshal(body, out); err != nil {
 		return fmt.Errorf("%w: decoding body: %s", ErrUnavailable, err)
+	}
+	return nil
+}
+
+// classifyError returns the sentinel for this error, or nil if not classified.
+// Used consistently to avoid misclassifying deadline/timeout errors as unavailable.
+func classifyError(err error) error {
+	if errors.Is(err, context.DeadlineExceeded) || isTimeout(err) {
+		return ErrDeadlineExceeded
 	}
 	return nil
 }
