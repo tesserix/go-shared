@@ -2,6 +2,7 @@ package schema
 
 import (
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -47,4 +48,35 @@ func TestFor_RejectsUntypedInterface(t *testing.T) {
 func TestFor_RejectsUnsupportedKind(t *testing.T) {
 	_, err := For(make(chan int))
 	require.Error(t, err)
+}
+
+type category struct {
+	Name     string      `json:"name"`
+	Children []*category `json:"children"`
+}
+
+func TestFor_RejectsSelfReferentialTypes(t *testing.T) {
+	_, err := For(category{})
+	require.Error(t, err, "self-referential types must be detected and rejected")
+}
+
+type withTime struct {
+	Name      string    `json:"name"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+func TestFor_SpecialCasesTimeTime(t *testing.T) {
+	s, err := For(withTime{})
+	require.NoError(t, err)
+
+	props := s["properties"].(map[string]any)
+	timeSchema := props["created_at"].(map[string]any)
+	assert.Equal(t, "string", timeSchema["type"], "time.Time should be string type")
+	assert.Equal(t, "date-time", timeSchema["format"], "time.Time should have date-time format")
+}
+
+func TestFor_RejectsAllMaps(t *testing.T) {
+	_, err := For(map[string]string{})
+	require.Error(t, err, "maps cannot have closed schemas")
+	assert.Contains(t, err.Error(), "map", "error should mention that maps are rejected")
 }
