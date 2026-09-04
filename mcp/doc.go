@@ -15,5 +15,12 @@
 // otherwise force a go-shared release affecting every service to change
 // something only MCP servers care about.
 //
-// boundaries_test.go enforces both halves of that. See the design's D9.
+// Only the first of those is machine-enforced. boundaries_test.go checks the
+// real dependency graph (via `go list -deps`) and fails if this package tree
+// imports an MCP SDK or a product package — that is D9 and D2. The absence of
+// protocol types is a design rule, not a machine-checked one: an import gate
+// cannot see a hand-written struct that mirrors a protocol shape (a
+// `protocolVersion` constant, a local `Tool` or `CallToolResult` lookalike).
+// Keeping protocol types out of this tree is enforced by review, same as it
+// would be in any package with no SDK dependency to check against.
 package mcp
