@@ -1,6 +1,7 @@
 package schema
 
 import (
+	"encoding/json"
 	"testing"
 	"time"
 
@@ -100,4 +101,87 @@ func TestFor_RejectsStructWithOnlyUnexportedFields(t *testing.T) {
 	_, err := For(opaque{})
 	require.Error(t, err, "struct with only unexported fields must be rejected")
 	assert.Contains(t, err.Error(), "exported", "error should explain that no fields are exported")
+}
+
+// Shared pagination/filter fields are an ordinary Go idiom, and encoding/json
+// promotes an untagged embedded struct's fields into the parent object. A
+// schema that declares the embedded TYPE as a property describes a wire shape
+// that never occurs — so the derived schema must flatten it the same way.
+type page struct {
+	Limit  int    `json:"limit"`
+	Cursor string `json:"cursor,omitempty"`
+}
+
+type pagedProducts struct {
+	page
+	Slug string `json:"slug"`
+}
+
+func TestFor_FlattensEmbeddedStruct(t *testing.T) {
+	s, err := For(pagedProducts{})
+	require.NoError(t, err)
+
+	props := s["properties"].(map[string]any)
+	assert.NotContains(t, props, "page", "the embedded type is not a wire field")
+	assert.Equal(t, "integer", props["limit"].(map[string]any)["type"])
+	assert.Equal(t, "string", props["cursor"].(map[string]any)["type"])
+	assert.Equal(t, "string", props["slug"].(map[string]any)["type"])
+	assert.ElementsMatch(t, []any{"limit", "slug"}, s["required"])
+
+	// The schema must describe what encoding/json actually produces.
+	raw, err := json.Marshal(pagedProducts{page: page{Limit: 3}, Slug: "bondi"})
+	require.NoError(t, err)
+	var wire map[string]any
+	require.NoError(t, json.Unmarshal(raw, &wire))
+	for k := range wire {
+		assert.Contains(t, props, k, "marshalled field %q is absent from the schema", k)
+	}
+}
+
+type taggedEmbed struct {
+	page `json:"page"`
+	Slug string `json:"slug"`
+}
+
+// A json tag on an embedded field makes encoding/json treat it as an ordinary
+// named field, so the schema must stay nested.
+func TestFor_KeepsJSONTaggedEmbeddedNested(t *testing.T) {
+	s, err := For(taggedEmbed{})
+	require.NoError(t, err)
+
+	props := s["properties"].(map[string]any)
+	nested, ok := props["page"].(map[string]any)
+	require.True(t, ok, "a json-tagged embedded field stays a nested object")
+	assert.Equal(t, "object", nested["type"])
+	assert.NotContains(t, props, "limit")
+}
+
+type embeddedPointer struct {
+	*page
+	Slug string `json:"slug"`
+}
+
+type namer interface{ Name() string }
+
+type embeddedInterface struct {
+	namer
+	Slug string `json:"slug"`
+}
+
+type embeddedCollision struct {
+	page
+	Limit int `json:"limit"`
+}
+
+// Loud at registration beats silently wrong in production: the shapes this
+// package cannot describe faithfully must be errors, not guesses.
+func TestFor_RejectsUnflattenableEmbeddedFields(t *testing.T) {
+	_, err := For(embeddedPointer{})
+	require.Error(t, err, "an embedded pointer's nil-ness changes the wire shape")
+
+	_, err = For(embeddedInterface{})
+	require.Error(t, err, "an embedded interface has no known fields")
+
+	_, err = For(embeddedCollision{})
+	require.Error(t, err, "a promoted name that collides cannot be expressed in one schema")
 }
