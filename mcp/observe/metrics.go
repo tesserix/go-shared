@@ -1,0 +1,62 @@
+// Package observe carries a connector's per-tool metrics.
+//
+// Outcome is a label rather than separate metrics because the distinction that
+// matters is between a server that has STOPPED SERVING and one that KEEPS
+// FAILING — and both are invisible if success and failure share a counter.
+package observe
+
+import (
+	"time"
+
+	"github.com/prometheus/client_golang/prometheus"
+)
+
+// Outcome is the controlled vocabulary for how a tool call ended.
+type Outcome string
+
+const (
+	OutcomeOK           Outcome = "ok"
+	OutcomeNotFound     Outcome = "not_found"
+	OutcomeUnavailable  Outcome = "unavailable"
+	OutcomeDeadline     Outcome = "deadline"
+	OutcomeInvalidInput Outcome = "invalid_input"
+)
+
+// ToolMetrics records tool call counts and latency.
+type ToolMetrics struct {
+	calls    *prometheus.CounterVec
+	duration *prometheus.HistogramVec
+}
+
+// NewToolMetrics registers the metrics on reg.
+func NewToolMetrics(reg prometheus.Registerer, service string) (*ToolMetrics, error) {
+	labels := prometheus.Labels{"service": service}
+
+	calls := prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name:        "tesserix_mcp_tool_calls_total",
+		Help:        "Tool calls by tool and outcome. Read outcome!=ok against outcome=ok — a tool that only fails and a tool nobody calls look identical in a single total.",
+		ConstLabels: labels,
+	}, []string{"tool", "outcome"})
+
+	duration := prometheus.NewHistogramVec(prometheus.HistogramOpts{
+		Name: "tesserix_mcp_tool_duration_seconds",
+		Help: "Tool call latency. The engine budgets 400ms p99 per tool; this is how you know whether that contract holds.",
+		// Bucketed around the 400ms contract rather than Prometheus defaults.
+		Buckets:     []float64{0.01, 0.025, 0.05, 0.1, 0.2, 0.4, 0.8, 2},
+		ConstLabels: labels,
+	}, []string{"tool", "outcome"})
+
+	if err := reg.Register(calls); err != nil {
+		return nil, err
+	}
+	if err := reg.Register(duration); err != nil {
+		return nil, err
+	}
+	return &ToolMetrics{calls: calls, duration: duration}, nil
+}
+
+// Observe records one completed tool call.
+func (m *ToolMetrics) Observe(tool string, outcome Outcome, d time.Duration) {
+	m.calls.WithLabelValues(tool, string(outcome)).Inc()
+	m.duration.WithLabelValues(tool, string(outcome)).Observe(d.Seconds())
+}
