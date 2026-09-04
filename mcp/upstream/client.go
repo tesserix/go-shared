@@ -128,11 +128,12 @@ func (c *Client) Get(ctx context.Context, reqPath string, params url.Values, out
 	fullPath := basePath + reqPath
 	fullPath = path.Clean(fullPath)
 
-	// Guard against escape: the result must be within the base path.
-	// If base is /api/v1, and reqPath is /../admin, fullPath becomes /admin,
-	// which is outside /api/v1. Reject it.
-	basePath = strings.TrimSuffix(basePath, "/")
-	if basePath != "" && !strings.HasPrefix(fullPath+"/", basePath+"/") && fullPath != basePath {
+	// Guard against escape: the result must be within the base path. If base is
+	// /api/v1 and reqPath is /../admin, fullPath becomes /admin, which is
+	// outside /api/v1. Comparing fullPath+"/" against basePath+"/" also admits
+	// the exact-match case (fullPath == basePath), so that needs no clause of
+	// its own.
+	if basePath != "" && !strings.HasPrefix(fullPath+"/", basePath+"/") {
 		return fmt.Errorf("upstream: path traversal rejected")
 	}
 
