@@ -145,13 +145,37 @@ func (r *Registry) Tools() []Tool {
 	return out
 }
 
-// Names returns registered tool names, sorted. The declared-vs-served check
-// compares this against the registry record.
-func (r *Registry) Names() []string {
-	tools := r.Tools()
-	names := make([]string, len(tools))
-	for i, t := range tools {
-		names[i] = t.Name
+// Get returns the named tool, deep-copying only that one. Serving tools/call
+// means "find the tool named X", and doing that through Tools() would deep-copy
+// both schemas of every registered tool on every invocation.
+func (r *Registry) Get(name string) (Tool, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	t, ok := r.tools[name]
+	if !ok {
+		return Tool{}, false
 	}
+	return Tool{
+		Name:         t.Name,
+		Description:  t.Description,
+		InputSchema:  deepCopySchema(t.InputSchema),
+		OutputSchema: deepCopySchema(t.OutputSchema),
+		Invoke:       t.Invoke,
+	}, true
+}
+
+// Names returns registered tool names, sorted. The declared-vs-served check
+// compares this against the registry record. It reads the map directly rather
+// than going through Tools(), which would copy every schema to return strings.
+func (r *Registry) Names() []string {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	names := make([]string, 0, len(r.tools))
+	for name := range r.tools {
+		names = append(names, name)
+	}
+	sort.Strings(names)
 	return names
 }

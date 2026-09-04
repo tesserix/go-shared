@@ -112,3 +112,21 @@ func TestNames_IsSorted(t *testing.T) {
 	names := r.Names()
 	assert.Equal(t, []string{"apple", "mango", "zebra"}, names)
 }
+
+func TestGet_ReturnsDeepCopyAndReportsUnknown(t *testing.T) {
+	r := NewRegistry()
+	require.NoError(t, Register(r, "list_store_products", "List products.", listHandler))
+
+	_, ok := r.Get("nope")
+	assert.False(t, ok, "an unknown name must not look like a registered tool")
+
+	tool, ok := r.Get("list_store_products")
+	require.True(t, ok)
+	tool.InputSchema["properties"].(map[string]any)["store_slug"].(map[string]any)["description"] = "MUTATED"
+
+	again, ok := r.Get("list_store_products")
+	require.True(t, ok)
+	assert.Equal(t, "Public store slug",
+		again.InputSchema["properties"].(map[string]any)["store_slug"].(map[string]any)["description"],
+		"Get must hand back a deep copy, not registry state")
+}
