@@ -50,6 +50,7 @@ func NewToolMetrics(reg prometheus.Registerer, service string) (*ToolMetrics, er
 		return nil, err
 	}
 	if err := reg.Register(duration); err != nil {
+		reg.Unregister(calls)
 		return nil, err
 	}
 	return &ToolMetrics{calls: calls, duration: duration}, nil
