@@ -31,6 +31,10 @@ var (
 	ErrNotFound         = errors.New("upstream: not found")
 	ErrUnavailable      = errors.New("upstream: unavailable")
 	ErrDeadlineExceeded = errors.New("upstream: deadline exceeded")
+	// ErrInvalidPath is returned when a request path contains a segment Get
+	// refuses to interpret: ".", "..", or an interior empty segment (a "//"
+	// anywhere but a single trailing slash). See Get's doc comment.
+	ErrInvalidPath = errors.New("upstream: invalid path")
 )
 
 const defaultTimeout = 400 * time.Millisecond
@@ -109,9 +113,21 @@ func New(baseURL string, opts ...Option) (*Client, error) {
 }
 
 // Get fetches path and decodes the JSON body into out.
-// The request path is joined to the base URL's path prefix.
-// Path traversal attempts that would escape the base path are rejected.
+//
+// The request path is joined to the base URL's path prefix, and it is never
+// silently rewritten: every segment of reqPath is validated before any
+// cleaning happens. A segment equal to "." or ".." is refused, as is an
+// interior empty segment (a "//" anywhere inside the path). A single
+// trailing slash is fine — "/stores/bondi/" is a normal, benign path — only
+// interior empties are rejected. Rejections return an error wrapping
+// ErrInvalidPath. path.Clean and the base-path-prefix guard still run after
+// validation as defence in depth; on a validated path they are close to a
+// no-op, and that is the point.
 func (c *Client) Get(ctx context.Context, reqPath string, params url.Values, out any) error {
+	if err := validateReqPath(reqPath); err != nil {
+		return err
+	}
+
 	// Join base path with request path by string concatenation, not path.Join,
 	// to avoid absolute request paths replacing the base path entirely.
 	// Normalize base: if empty, use "/".
@@ -126,7 +142,15 @@ func (c *Client) Get(ctx context.Context, reqPath string, params url.Values, out
 	// Concatenate: trim trailing / from base, append request path
 	basePath = strings.TrimSuffix(basePath, "/")
 	fullPath := basePath + reqPath
+	hadTrailingSlash := strings.HasSuffix(fullPath, "/") && fullPath != "/"
 	fullPath = path.Clean(fullPath)
+	// path.Clean strips a trailing slash; validateReqPath already established
+	// that reqPath's trailing slash (if any) was benign, not an escape
+	// attempt, so restore it — the request must reach the server exactly as
+	// the caller asked, per Get's doc comment.
+	if hadTrailingSlash && !strings.HasSuffix(fullPath, "/") {
+		fullPath += "/"
+	}
 
 	// Guard against escape: the result must be within the base path. If base is
 	// /api/v1 and reqPath is /../admin, fullPath becomes /admin, which is
@@ -181,6 +205,30 @@ func (c *Client) Get(ctx context.Context, reqPath string, params url.Values, out
 	}
 	if err := json.Unmarshal(body, out); err != nil {
 		return fmt.Errorf("%w: decoding body: %s", ErrUnavailable, err)
+	}
+	return nil
+}
+
+// validateReqPath rejects a request path before any cleaning is done to it,
+// so Get never silently rewrites what the caller asked for. It refuses a
+// segment equal to "." or ".." and any interior empty segment. The leading
+// empty segment produced by a leading "/" is not interior and is allowed,
+// and so is a single trailing empty segment (a trailing slash) — only an
+// empty segment strictly between two others is rejected.
+//
+// The returned error names the offending segment but never the full path: a
+// base URL can carry credentials in userinfo, and a path can carry
+// identifiers that should not be echoed back wholesale into logs or errors.
+func validateReqPath(reqPath string) error {
+	segments := strings.Split(reqPath, "/")
+	last := len(segments) - 1
+	for i, seg := range segments {
+		switch {
+		case seg == "." || seg == "..":
+			return fmt.Errorf("%w: segment %q", ErrInvalidPath, seg)
+		case seg == "" && i != 0 && i != last:
+			return fmt.Errorf("%w: empty segment", ErrInvalidPath)
+		}
 	}
 	return nil
 }

@@ -2,6 +2,8 @@ package upstream
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -235,4 +237,156 @@ func TestWithHTTPClient_DefaultTimeoutStillApplies(t *testing.T) {
 	c, err := New("http://example.com", WithHTTPClient(&http.Client{Timeout: 30 * time.Second}))
 	require.NoError(t, err)
 	assert.Equal(t, defaultTimeout, c.http.Timeout)
+}
+
+// Dot-segment rejection must not depend on the base URL having a path prefix
+// to escape. This is the case the old path.Clean+prefix guard missed: with no
+// base path, TrimSuffix leaves basePath == "", the guard is skipped, and
+// path.Clean silently rewrote the caller's ".." away.
+func TestGet_RejectsDotDotWithNoBasePath(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("server must not receive request with path %s", r.URL.Path)
+	}))
+	defer srv.Close()
+
+	c, err := New(srv.URL)
+	require.NoError(t, err)
+
+	var got result
+	err = c.Get(context.Background(), "/stores/../products/mug", nil, &got)
+	require.Error(t, err)
+	require.ErrorIs(t, err, ErrInvalidPath)
+	assert.NotErrorIs(t, err, ErrNotFound)
+	assert.NotErrorIs(t, err, ErrUnavailable)
+	assert.NotErrorIs(t, err, ErrDeadlineExceeded)
+}
+
+// Same case, but with a base path prefix — the guard that already existed
+// must keep working alongside the new validation.
+func TestGet_RejectsDotDotWithBasePath(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("server must not receive request with path %s", r.URL.Path)
+	}))
+	defer srv.Close()
+
+	c, err := New(srv.URL + "/api/v1")
+	require.NoError(t, err)
+
+	var got result
+	err = c.Get(context.Background(), "/../admin", nil, &got)
+	require.Error(t, err)
+	require.ErrorIs(t, err, ErrInvalidPath)
+}
+
+// A single "." segment must be rejected the same way "..".
+func TestGet_RejectsDotSegment(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("server must not receive request with path %s", r.URL.Path)
+	}))
+	defer srv.Close()
+
+	c, err := New(srv.URL)
+	require.NoError(t, err)
+
+	var got result
+	err = c.Get(context.Background(), "/stores/./products", nil, &got)
+	require.Error(t, err)
+	require.ErrorIs(t, err, ErrInvalidPath)
+}
+
+// An interior empty segment ("//") must be rejected — this was a real bug in
+// a downstream consumer: an empty interpolated variable produced
+// "/stores//products" and path.Clean silently collapsed it to a different
+// resource, "/stores/products".
+func TestGet_RejectsInteriorEmptySegment(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("server must not receive request with path %s", r.URL.Path)
+	}))
+	defer srv.Close()
+
+	c, err := New(srv.URL)
+	require.NoError(t, err)
+
+	var got result
+	err = c.Get(context.Background(), "/stores//products", nil, &got)
+	require.Error(t, err)
+	require.ErrorIs(t, err, ErrInvalidPath)
+}
+
+// A single trailing slash is a normal, benign path and must keep working —
+// it is not an interior empty segment, and it must reach the server intact.
+func TestGet_AllowsTrailingSlash(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "/stores/bondi/", r.URL.Path)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"handle":"bondi"}`))
+	}))
+	defer srv.Close()
+
+	c, err := New(srv.URL)
+	require.NoError(t, err)
+
+	var got result
+	require.NoError(t, c.Get(context.Background(), "/stores/bondi/", nil, &got))
+	assert.Equal(t, "bondi", got.Handle)
+}
+
+// A request path with no leading slash must still work for the normal case
+// (the "/" prefix is added before dispatch, not before validation escapes
+// something), and "stores/../x" — traversal without a leading slash — must
+// still be rejected.
+func TestGet_NoLeadingSlash(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "/products", r.URL.Path)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"handle":"item"}`))
+	}))
+	defer srv.Close()
+
+	c, err := New(srv.URL)
+	require.NoError(t, err)
+
+	var got result
+	require.NoError(t, c.Get(context.Background(), "products", nil, &got))
+	assert.Equal(t, "item", got.Handle)
+}
+
+func TestGet_RejectsDotDotWithoutLeadingSlash(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("server must not receive request with path %s", r.URL.Path)
+	}))
+	defer srv.Close()
+
+	c, err := New(srv.URL)
+	require.NoError(t, err)
+
+	var got result
+	err = c.Get(context.Background(), "stores/../x", nil, &got)
+	require.Error(t, err)
+	require.ErrorIs(t, err, ErrInvalidPath)
+}
+
+// The error must name the offending segment but never the full path — a
+// base URL can carry credentials in userinfo, and paths can carry
+// identifiers that should not be echoed back wholesale into logs/errors.
+func TestGet_InvalidPathErrorOmitsFullPath(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("server must not receive request with path %s", r.URL.Path)
+	}))
+	defer srv.Close()
+
+	c, err := New(srv.URL)
+	require.NoError(t, err)
+
+	var got result
+	err = c.Get(context.Background(), "/stores/secret-tenant-id/../admin", nil, &got)
+	require.Error(t, err)
+	assert.NotContains(t, err.Error(), "/stores/secret-tenant-id/../admin")
+	assert.Contains(t, err.Error(), "..")
+}
+
+// errors.Is must classify via ErrInvalidPath directly too, sanity-checking
+// the sentinel is actually exported and wrapped, not just stringly matched.
+func TestErrInvalidPath_IsExported(t *testing.T) {
+	require.True(t, errors.Is(fmt.Errorf("upstream: invalid path segment %q: %w", "..", ErrInvalidPath), ErrInvalidPath))
 }
