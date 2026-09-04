@@ -21,7 +21,9 @@ type Tool struct {
 	Invoke       func(context.Context, json.RawMessage) (any, error)
 }
 
-// Registry holds the tools a server serves. Safe for concurrent use.
+// Registry holds the tools a server serves. Safe for concurrent registration and
+// reading. Returned tools carry their own deep copies of their schemas, so a
+// caller cannot mutate registry state through a returned Tool.
 type Registry struct {
 	mu    sync.RWMutex
 	tools map[string]Tool
@@ -90,14 +92,54 @@ func Register[In, Out any](r *Registry, name, description string, h func(context
 	return nil
 }
 
-// Tools returns every registered tool, sorted by name.
+// deepCopySchema recursively deep-copies a JSON Schema map, including nested
+// maps and slices, so that returned tools carry independent schema copies.
+func deepCopySchema(s map[string]any) map[string]any {
+	if s == nil {
+		return nil
+	}
+	result := make(map[string]any, len(s))
+	for k, v := range s {
+		result[k] = deepCopyValue(v)
+	}
+	return result
+}
+
+// deepCopyValue recursively copies a value, handling maps and slices.
+func deepCopyValue(v any) any {
+	switch val := v.(type) {
+	case map[string]any:
+		return deepCopySchema(val)
+	case []any:
+		result := make([]any, len(val))
+		for i, item := range val {
+			result[i] = deepCopyValue(item)
+		}
+		return result
+	default:
+		// Scalars (string, bool, number, nil) are immutable and safe to share
+		return v
+	}
+}
+
+// Tools returns every registered tool, sorted by name. Each tool carries its own
+// deep copy of its schemas, so mutations by the caller do not affect registry state
+// or other tools.
 func (r *Registry) Tools() []Tool {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
 	out := make([]Tool, 0, len(r.tools))
 	for _, t := range r.tools {
-		out = append(out, t)
+		// Deep-copy schemas so returned tools are independent of registry state
+		toolCopy := Tool{
+			Name:         t.Name,
+			Description:  t.Description,
+			InputSchema:  deepCopySchema(t.InputSchema),
+			OutputSchema: deepCopySchema(t.OutputSchema),
+			Invoke:       t.Invoke,
+		}
+		out = append(out, toolCopy)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
 	return out
