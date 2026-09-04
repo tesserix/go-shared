@@ -1,12 +1,16 @@
 package observe
 
 import (
+	"errors"
+	"fmt"
 	"testing"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/require"
+	"github.com/tesserix/go-shared/mcp"
+	"github.com/tesserix/go-shared/mcp/upstream"
 )
 
 func TestObserve_CountsPerToolAndOutcome(t *testing.T) {
@@ -66,4 +70,28 @@ func TestNewToolMetrics_CleansUpOnPartialFailure(t *testing.T) {
 
 	err = reg.Register(testCalls)
 	require.NoError(t, err, "registry was not cleaned up after partial failure; calls collector was left behind")
+}
+
+// The mapping from an upstream failure to an outcome label is 1:1 and obvious,
+// which is exactly why it belongs here once instead of in every connector's own
+// switch — the estate's dashboards are only comparable if the labels agree.
+func TestOutcomeFor_MapsEveryKnownFailure(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want Outcome
+	}{
+		{"nil is success", nil, OutcomeOK},
+		{"not found", upstream.ErrNotFound, OutcomeNotFound},
+		{"unavailable", upstream.ErrUnavailable, OutcomeUnavailable},
+		{"deadline", upstream.ErrDeadlineExceeded, OutcomeDeadline},
+		{"invalid arguments", mcp.ErrInvalidArguments, OutcomeInvalidInput},
+		{"wrapped", fmt.Errorf("listing products: %w", upstream.ErrDeadlineExceeded), OutcomeDeadline},
+		{"anything else", errors.New("projection bug"), OutcomeError},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			require.Equal(t, tc.want, OutcomeFor(tc.err))
+		})
+	}
 }

@@ -20,6 +20,11 @@ const (
 	OutcomeUnavailable  Outcome = "unavailable"
 	OutcomeDeadline     Outcome = "deadline"
 	OutcomeInvalidInput Outcome = "invalid_input"
+	// OutcomeError is the catch-all: a handler failure that is none of the
+	// above — a projection bug, a marshal failure. Without it every connector
+	// invents its own "error"/"internal"/"failed" and the label stops being a
+	// vocabulary.
+	OutcomeError Outcome = "error"
 )
 
 // ToolMetrics records tool call counts and latency.
@@ -57,6 +62,12 @@ func NewToolMetrics(reg prometheus.Registerer, service string) (*ToolMetrics, er
 }
 
 // Observe records one completed tool call.
+//
+// tool MUST be a REGISTERED tool name, never a value taken off the wire. The
+// name in an MCP tools/call request is supplied by the caller, so feeding it
+// straight in lets a caller mint an unbounded number of label values and
+// inflate metric cardinality at will. Look the name up in the registry first
+// and record only what came back.
 func (m *ToolMetrics) Observe(tool string, outcome Outcome, d time.Duration) {
 	m.calls.WithLabelValues(tool, string(outcome)).Inc()
 	m.duration.WithLabelValues(tool, string(outcome)).Observe(d.Seconds())
