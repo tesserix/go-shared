@@ -130,3 +130,30 @@ func TestGet_ReturnsDeepCopyAndReportsUnknown(t *testing.T) {
 		again.InputSchema["properties"].(map[string]any)["store_slug"].(map[string]any)["description"],
 		"Get must hand back a deep copy, not registry state")
 }
+
+// A connector has to tell "the agent sent bad arguments" from "the handler
+// failed" to pick an outcome label, and string-matching a fmt.Errorf is not a
+// seam.
+func TestInvoke_DecodeFailureIsErrInvalidArguments(t *testing.T) {
+	r := NewRegistry()
+	require.NoError(t, Register(r, "list_store_products", "List products.", listHandler))
+	tool, ok := r.Get("list_store_products")
+	require.True(t, ok)
+
+	_, err := tool.Invoke(context.Background(), json.RawMessage(`{"store_id":"7"}`))
+	require.ErrorIs(t, err, ErrInvalidArguments, "an undeclared field is a caller error")
+
+	_, err = tool.Invoke(context.Background(), json.RawMessage(`{"store_slug":`))
+	require.ErrorIs(t, err, ErrInvalidArguments, "malformed JSON is a caller error")
+}
+
+// The package is strict everywhere else; a second JSON value after a valid one
+// must not be silently discarded.
+func TestInvoke_RejectsTrailingGarbage(t *testing.T) {
+	r := NewRegistry()
+	require.NoError(t, Register(r, "list_store_products", "List products.", listHandler))
+	tool, _ := r.Get("list_store_products")
+
+	_, err := tool.Invoke(context.Background(), json.RawMessage(`{"store_slug":"bondi"} {"store_slug":"evil"}`))
+	require.ErrorIs(t, err, ErrInvalidArguments)
+}

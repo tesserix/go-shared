@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"reflect"
 	"sort"
@@ -11,6 +12,13 @@ import (
 
 	"github.com/tesserix/go-shared/mcp/schema"
 )
+
+// ErrInvalidArguments marks a tool call the CALLER got wrong — malformed JSON,
+// a field the closed input schema does not declare, or trailing content after
+// the arguments object. It is the seam that lets a connector report
+// observe.OutcomeInvalidInput instead of blaming its own handler, without
+// string-matching an error message.
+var ErrInvalidArguments = errors.New("mcp: invalid arguments")
 
 // Tool is a registered, fully-described tool.
 type Tool struct {
@@ -40,6 +48,15 @@ func NewRegistry() *Registry {
 // no way to call this without an input type and an output type, so a tool
 // cannot exist without both. The only remaining hole is naming `any` as the
 // output, which is rejected below.
+//
+// The input schema's `required` list is NOT enforced when arguments are
+// decoded. DisallowUnknownFields closes the schema against fields nobody
+// declared; it says nothing about fields nobody sent. Go cannot tell an absent
+// field from one carrying its zero value without decoding to a map first, which
+// would give up the typed handler signature that is the point of this API. So a
+// handler MUST treat a zero value as possibly-absent — an empty store_slug is
+// what a missing store_slug looks like — and validate anything it actually
+// requires. Only the schema published to the model carries `required`.
 func Register[In, Out any](r *Registry, name, description string, h func(context.Context, In) (Out, error)) error {
 	if name == "" {
 		return fmt.Errorf("mcp: tool name must not be empty")
@@ -83,7 +100,13 @@ func Register[In, Out any](r *Registry, name, description string, h func(context
 			dec.DisallowUnknownFields()
 			if len(raw) > 0 {
 				if err := dec.Decode(&args); err != nil {
-					return nil, fmt.Errorf("mcp: tool %q arguments: %w", name, err)
+					return nil, fmt.Errorf("%w: tool %q: %s", ErrInvalidArguments, name, err)
+				}
+				// A second JSON value after a valid one is a caller error too.
+				// Decode stops at the end of the first value and would
+				// otherwise discard the rest in silence.
+				if dec.More() {
+					return nil, fmt.Errorf("%w: tool %q: unexpected content after the arguments object", ErrInvalidArguments, name)
 				}
 			}
 			return h(ctx, args)
@@ -117,7 +140,11 @@ func deepCopyValue(v any) any {
 		}
 		return result
 	default:
-		// Scalars (string, bool, number, nil) are immutable and safe to share
+		// Scalars (string, bool, number, nil) are immutable and safe to share.
+		// Anything else falls through by REFERENCE, which is safe only because
+		// schema.For emits nothing but map[string]any, []any and scalars. A
+		// schema source that emitted another mutable kind would need a case
+		// here.
 		return v
 	}
 }
