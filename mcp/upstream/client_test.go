@@ -210,3 +210,29 @@ func TestGet_DoesNotFollowRedirectWithCallerClient(t *testing.T) {
 	var got result
 	require.Error(t, c.Get(context.Background(), "/products", nil, &got))
 }
+
+// The per-request budget is a contract, so option ORDER must not be able to
+// change it. WithHTTPClient(clientWith30s) silently winning over WithTimeout is
+// a 75x overrun of a 400ms budget.
+func TestWithTimeout_SurvivesWithHTTPClientInEitherOrder(t *testing.T) {
+	want := time.Second
+
+	callerFirst, err := New("http://example.com",
+		WithHTTPClient(&http.Client{Timeout: 30 * time.Second}), WithTimeout(want))
+	require.NoError(t, err)
+
+	timeoutFirst, err := New("http://example.com",
+		WithTimeout(want), WithHTTPClient(&http.Client{Timeout: 30 * time.Second}))
+	require.NoError(t, err)
+
+	assert.Equal(t, want, callerFirst.http.Timeout)
+	assert.Equal(t, want, timeoutFirst.http.Timeout,
+		"a caller-supplied client must not silently discard WithTimeout")
+}
+
+// With no WithTimeout, the default budget still applies to a supplied client.
+func TestWithHTTPClient_DefaultTimeoutStillApplies(t *testing.T) {
+	c, err := New("http://example.com", WithHTTPClient(&http.Client{Timeout: 30 * time.Second}))
+	require.NoError(t, err)
+	assert.Equal(t, defaultTimeout, c.http.Timeout)
+}

@@ -40,6 +40,9 @@ type Client struct {
 	base    *url.URL
 	headers map[string]string
 	http    *http.Client
+	// timeout is the intended per-request budget. It is held separately from
+	// http.Timeout so New can stamp it after every option has run — see New.
+	timeout time.Duration
 }
 
 // Option configures a Client.
@@ -53,22 +56,20 @@ func WithHeader(k, v string) Option {
 // WithTimeout overrides the per-request deadline. Defaults to 400ms, the
 // per-tool budget the engine contracts for.
 func WithTimeout(d time.Duration) Option {
-	return func(c *Client) { c.http.Timeout = d }
+	return func(c *Client) { c.timeout = d }
 }
 
-// WithHTTPClient replaces the underlying client. The timeout is preserved, and
-// so is the no-redirect policy — New re-applies it to the copy after every
-// option has run. The supplied client is shallow-copied to avoid mutating the
-// caller's object.
+// WithHTTPClient replaces the underlying transport, dialer and so on. The
+// per-request budget is NOT taken from the supplied client: New stamps the
+// Client's own timeout (WithTimeout, else the 400ms default) onto the copy
+// after every option has run, so option order cannot change the effective
+// deadline. The no-redirect policy is re-applied there for the same reason.
+// The supplied client is shallow-copied to avoid mutating the caller's object.
 func WithHTTPClient(h *http.Client) Option {
 	return func(c *Client) {
-		t := c.http.Timeout
 		// Shallow-copy to avoid mutating the caller's client.
 		cp := *h
 		c.http = &cp
-		if c.http.Timeout == 0 {
-			c.http.Timeout = t
-		}
 	}
 }
 
@@ -84,11 +85,16 @@ func New(baseURL string, opts ...Option) (*Client, error) {
 	c := &Client{
 		base:    u,
 		headers: map[string]string{},
-		http:    &http.Client{Timeout: defaultTimeout},
+		http:    &http.Client{},
+		timeout: defaultTimeout,
 	}
 	for _, o := range opts {
 		o(c)
 	}
+	// Stamped AFTER the options so WithTimeout and WithHTTPClient commute: the
+	// budget is a contract, and whichever order a caller writes them in, the
+	// effective deadline is the same.
+	c.http.Timeout = c.timeout
 	// Applied AFTER the options so a caller-supplied client cannot reopen the
 	// hole. Headers added by WithHeader are the credential path, and the
 	// stdlib only strips Authorization/Cookie across hosts — every other
