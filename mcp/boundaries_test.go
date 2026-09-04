@@ -12,9 +12,13 @@ import (
 // toolchain itself computes it. Shelling out to `go list` avoids adding
 // golang.org/x/tools as a dependency purely to enforce a rule about
 // dependencies.
+//
+// -test is load-bearing: the rule is "no MCP SDK import, anywhere, not in code
+// and not in tests", and without it `go list -deps` reports only the non-test
+// dependency graph — an SDK imported by a _test.go file would pass unseen.
 func deps(t *testing.T) []string {
 	t.Helper()
-	out, err := exec.Command("go", "list", "-deps", "./...").Output()
+	out, err := exec.Command("go", "list", "-deps", "-test", "./...").Output()
 	require.NoError(t, err, "go list must succeed")
 	return strings.Fields(string(out))
 }
